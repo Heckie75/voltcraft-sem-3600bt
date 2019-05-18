@@ -1,0 +1,2948 @@
+#!/usr/bin/expect
+#
+# Shell script in order to control Voltcraft SEM 3600BT
+#
+# Version: 2019-04-28
+#
+# MIT License
+#
+# Copyright (c) 2019 heckie75
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+# CLAIM, DAMAGES OR OTHER LIABILITY, kWHETHER IN AN ACTION OF CONTRACT,
+# TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH
+# THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+# sets output to stdout and debug
+log_user 0
+
+set verbose 0
+
+set DELAY 100
+
+set timeout 3
+
+set MAC_PATTERN                "\[0-9A-F]{2}:\[0-9A-F]{2}:\[0-9A-F]{2}:\[0-9A-F]{2}:\[0-9A-F]{2}:\[0-9A-F]{2}"
+set WEEKDAYS                   "SMTWTFS"
+set KNOWN_SEMS_FILE            "~/.known_sems"
+
+set HANDLE(subscribe_measures) 19
+
+set HANDLE(cmd)                24
+set HANDLE(subscribe_cmd)      25
+
+
+set REQ_COMMAND(data_hour)     1
+set REQ_COMMAND(data_minute)   2
+set REQ_COMMAND(sync)          3
+set REQ_COMMAND(sync)          3
+set REQ_COMMAND(switch)        4
+set REQ_COMMAND(countdown)     6
+set REQ_COMMAND(set_scheduler) 12
+set REQ_COMMAND(scheduler)     14
+set REQ_COMMAND(set_standby)   19
+set REQ_COMMAND(standby)       20
+set REQ_COMMAND(set_overload)  21
+set REQ_COMMAND(overload)      22
+set REQ_COMMAND(consumption)   23
+set REQ_COMMAND(uptime)        24
+set REQ_COMMAND(reset)         25
+
+set REQ_HND(device_name)       3
+set REQ_HND(device_serial)     32
+set REQ_HND(device_firmware)   34
+set REQ_HND(device_hardware)   36
+set REQ_HND(device_software)   38
+set REQ_HND(device_vendor)     40
+
+set NOTIFY(none)               -1
+set NOTIFY(measurement)        18
+set NOTIFY(cmd)                24
+
+set NOTIFIED(none)             0
+set NOTIFIED(measurement)      1
+set NOTIFIED(scheduler)        2
+set NOTIFIED(countdown)        4
+set NOTIFIED(overload)         8
+set NOTIFIED(standby)          16
+set NOTIFIED(uptime)           32
+set NOTIFIED(consumption)      64
+set NOTIFIED(data)             128
+
+set INIT(connect)              1
+set INIT(auth)                 2
+set INIT(subscribe_cmd)        4
+set INIT(subscribe_measures)   8
+set INIT(device)               16
+
+array set aliases              {}
+
+set sem(initialized)           0
+
+set sem(mac)                   ""
+set sem(alias)                 ""
+set sem(device_name)           ""
+set sem(device_serial)         ""
+set sem(device_firmware)       ""
+set sem(device_hardware)       ""
+set sem(device_software)       ""
+set sem(device_vendor)         ""
+
+set sem(secret)                -1
+set sem(power)                 -1
+set sem(countdown)             -1
+set sem(overload)              -1
+set sem(standby)               -1
+set sem(uptime)                -1
+set sem(consumption)           -1
+set sem(header_data)           ""
+set sem(header_measure)        ""
+
+array set data_per_hour        {}
+array set data_per_minute      {}
+
+set HELP(usage) "Usage: <mac/alias> --<command1> <parameters...> --<command2>\n\
+ \                                  <mac>: bluetooth mac address of energy smart meter\n\
+ \                                  <alias>: you can use alias instead of mac address, see ~/.known_sems \n\
+ \                                  <command>: For command and parameters"
+set HELP(sync) "\
+  --sync                             - synchronize time"
+
+set HELP(on) "\
+  --on                               - turn on socket"
+
+set HELP(off) "\
+  --off                              - turn off socket"
+
+set HELP(toggle) "\
+  --toggle                           - toggle socket"
+
+set HELP(status) "\
+  --status                           - get status incl. voltage, ampere, watts, power factor and frequency"
+
+set HELP(measure) "\
+  --measure \[<s>\]                    - take measurements, optional duration in seconds (use 0 for single), otherwise forever"
+
+set HELP(header) "\
+  --header <measure|data>            - print header line for measurements or data"
+
+set HELP(uptime) "\
+  --uptime                           - query power-on uptime"
+
+set HELP(consumption) "\
+  --consumption                      - query power-on consumption"
+
+set HELP(total) "\
+  --total                            - query power-on uptime and consumption"
+
+set HELP(data) "\
+  --data hour \[all|<MM-DD|-d>\] \[<MM-DD|+d>\]\n\
+\                                   - query data on hourly base, max. 89 days in the past\n\
+\                                     (optional) from-date or days back from now or all data\n\
+\                                     (optional) to-date or days after from-date\n\
+\n\
+  --data min \[<all|-hh>\] \[<+hh>\]\n\
+\                                   - query data on minute base, max. 48h in the past\n\
+\                                     (optional) hours back from now or all data\n\
+\                                     (optional) hours after from\n\
+\                                     Note: Periods longer than 48h take very long time!"
+
+set HELP(reset) "\
+  --reset                            - reset all recorded data"
+
+
+set HELP(scheduler) "\
+  --scheduler <n> <on|off> <hh:mm|+mm> <on|off> <hh:mm|+mm> \[<smtwtfs>\]\n\
+\                                     n         - given scheduler where n is 1 - 6\n\
+\                                     on|off    - action of scheduler at start\n\
+\                                     hh:mm|+mm - start time or minutes from now\n\
+\                                     on|off    - action of scheduler at end\n\
+\                                     hh:mm|+mm - end time or minutes after start time, at least 1 minute \n\
+\                                     smtwtfs   - (optional) weekdays, use capital letters to set, e.g. sMTWTFs\n\
+\                                                 use the word \"sameday\" for same weekdays like today\n\
+\                                                 if weekdays are missing then scheduler runs only once
+\n\
+  --scheduler <n> <set|unset|reset>  - activate, deactivate or reset given scheduler\n\
+\n\
+  --scheduler <n>                    - query status of given scheduler where n is 1 - 6\n\
+\n\
+  --scheduler reset                  - resets all schedulers, i.e. 1 - 6\n\
+\n\
+  --scheduler                        - query status of all schedulers, i.e. 1 - 6"
+
+set HELP(countdown) "\
+  --countdown <on|off> <hh:mm|+mm>   - set countdown action and runtime\n\
+\                                     on|off - action of countdown\n\
+\                                     hh:mm  - given ETA\n\
+\                                     +mm    - given runtime in minutes\n\
+\n\
+  --countdown <reset>                - reset countdown\n\
+\n\
+  --countdown                        - query status of countdown"
+
+set HELP(overload) "\
+  --overload <watts> <warn|off> <alarm>\n\
+\                                   - set overload with high-water-mark and actions\n\
+\                                     watts - high-water-mark, max. 3699, e.g. 3699 for 3699W\n\
+\                                     warn  - led blinks when overloaded\n\
+\                                     off   - turn socket off if overloaded\n\
+\                                     alarm - (optional) alarm if overloaded\n\
+\n\
+  --overload off                     - turn overload off\n\
+\n\
+  --overload                         - query overload settings"
+
+set HELP(standby) "\
+  --standby <watts> <warn|off>       - set standby mode if consumption is below water-mark\n\
+\                                     watts - low-water-mark, max. 30.00, e.g. 5.0 for 5.0W\n\
+\                                     warn - led blinks when standby detected\n\
+\                                     off  - auto turn off socket when standby detected\n\
+\n\
+  --standby off                      - turn standby mode off\n\
+\n\
+  --standby                          - query standby settings"
+
+
+set HELP(print) "\
+  --print                            - print gathered information"
+
+set HELP(json) "\
+  --json                             - print some gathered information in JSON format"
+
+set HELP(dump) "\
+  --dump                             - request all information from device"
+
+set HELP(sleep) "\
+  --sleep <n>                        - pause processing for n seconds"
+
+set HELP(verbose) "\
+  --verbose                          - print information about processing"
+
+set HELP(device) "\
+  --device                           - request device meta data"
+
+set HELP(debug) "\
+  --debug                            - print actions in gatttool"
+
+set HELP(help) "\
+  --help \[<command>\]                 - print general help or help for specific command"
+
+
+
+
+# prints help output
+proc help { argv } {
+
+  global HELP
+
+  # print help for given command
+  if { [llength $argv] == 2 && [lindex $argv 0] == "--help" } {
+    set command [lindex $argv 1]
+    puts stderr $HELP(usage)
+
+    if { [ info exists HELP($command) ] == 1 } {
+      puts stderr "\n$HELP($command)\n"
+    } else {
+      puts stderr "\nUnknown command <$command>.\n"
+    }
+    exit 1
+  } elseif { [llength $argv ] < 1 || [ lindex $argv 0 ] == "--help" } {
+    puts stderr "$HELP(usage)"
+    puts stderr "\nBasic commands:\n"
+    puts stderr "$HELP(on)"
+    puts stderr "$HELP(off)"
+    puts stderr "$HELP(toggle)"
+    puts stderr "$HELP(status)"
+    puts stderr "\nScheduler commands:\n"
+    puts stderr "$HELP(scheduler)"
+    puts stderr "\nCountdown commands:\n"
+    puts stderr "$HELP(countdown)"
+    puts stderr "\nPower commands:\n"
+    puts stderr "$HELP(overload)"
+    puts stderr "$HELP(standby)"
+    puts stderr "\nMeasurement commands:\n"
+    puts stderr "$HELP(uptime)"
+    puts stderr "$HELP(consumption)"
+    puts stderr "$HELP(total)\n"
+    puts stderr "$HELP(measure)\n"
+    puts stderr "$HELP(data)\n"
+    puts stderr "$HELP(reset)\n"
+    puts stderr "$HELP(header)"
+    puts stderr "\nOther commands:\n"
+    puts stderr "$HELP(device)"
+    puts stderr "$HELP(sync)"
+    puts stderr "$HELP(print)"
+    puts stderr "$HELP(json)"
+    puts stderr "$HELP(dump)"
+    puts stderr "$HELP(sleep)"
+    puts stderr "$HELP(verbose)"
+    puts stderr "$HELP(debug)"
+    puts stderr "$HELP(help)"
+    puts stderr ""
+    exit 1
+  }
+
+}
+
+
+
+
+proc print_sem {} {
+
+  global sem
+
+  set out ""
+  append out [ print_device ]
+  append out [ print_measurement ]
+  append out [ print_uptime ]
+  append out [ print_consumption ]
+  append out [ print_avg_consumption ]
+  for { set i 0 } { $i < 6 } { incr i } {
+    append out [ print_scheduler $i ]
+  }
+  append out [ print_countdown ]
+  append out [ print_overload ]
+  append out [ print_standby ]
+  append out $sem(header_data)
+  append out [ print_data_hours ]
+  append out [ print_data_minutes ]
+  puts -nonewline $out
+
+}
+
+
+
+
+proc json_sem {} {
+
+  global sem
+
+  set out "{\n"
+  append out "[ json_device ],\n"
+  append out "[ json_measurement ],\n"
+  append out "[ json_consumption ],\n"
+  append out "[ json_scheduler ],\n"
+  append out "[ json_countdown ],\n"
+  append out "[ json_overload ],\n"
+  append out "[ json_standby ],\n"
+  append out "[ json_data_hours ],\n"
+  append out "[ json_data_minutes ]\n"
+
+  append out "}"
+  puts $out
+
+}
+
+
+
+
+proc read_aliases {} {
+
+  global MAC_PATTERN
+  global KNOWN_SEMS_FILE
+  global aliases
+
+  if { [ file exists "$KNOWN_SEMS_FILE" ] == 0 } {
+    return
+  }
+
+  set fp [ open "$KNOWN_SEMS_FILE" r ]
+  fconfigure $fp -buffering line
+
+  gets $fp data
+  while { $data != "" } {
+    regexp "($MAC_PATTERN) (\.+)" $data matched _mac _name
+
+    set aliases($_mac) $_name
+    gets $fp data
+  }
+
+  close $fp
+
+}
+
+
+
+
+proc lookup_alias { pattern } {
+
+  global aliases
+  global sem
+
+  set mac ""
+
+  foreach _mac [ lsort [ array names aliases ] ] {
+    if { [ string first "$pattern" $aliases($_mac) ] != -1 } {
+      set mac $_mac
+      set sem(alias) $aliases($_mac)
+    }
+  }
+
+  return $mac
+
+}
+
+
+
+
+proc get_mac { id } {
+
+  global MAC_PATTERN
+
+  set mac ""
+
+  set is_mac [ regexp "$MAC_PATTERN" $id ]
+  if { $is_mac == 1 } {
+    set mac $id
+  } else {
+    read_aliases
+    set mac [ lookup_alias $id ]
+  }
+
+  return $mac
+
+}
+
+
+
+
+proc hex_to_decimal { s } {
+
+  scan $s %x d
+  return $d
+
+}
+
+
+
+
+proc decimal_to_hex { d } {
+
+  scan $d %d d
+  set h [ format %4.2x $d ]
+  set h [ string trim $h ]
+
+  if { [ expr [ string length $h ] % 2 ] == 1 } {
+    set h "0$h"
+  }
+
+  return $h
+
+}
+
+
+
+
+proc current_datetime {} {
+
+  set dt {}
+  foreach n [ clock format [ clock seconds ] -format "%Y %m %e %k %M %S" ] {
+
+    lappend dt [ scan $n %d ]
+
+  }
+  return $dt
+
+}
+
+
+
+
+proc current_datetime_str {} {
+
+  return [ clock format [ clock seconds ] -format "%Y-%m-%d %H:%M:%S" ]
+
+}
+
+
+
+
+proc current_time_str {} {
+
+  return [ clock format [ clock seconds ] -format "%H:%M" ]
+
+}
+
+
+
+
+proc datetime_str { secs } {
+
+  return [ clock format $secs -format "%Y-%m-%d %H:%M:%S" ]
+
+}
+
+
+
+
+proc time_in_minutes { time } {
+
+  set part [ split $time ":" ]
+  scan [ lindex $part 0 ] %d hours
+  scan [ lindex $part 1 ] %d minutes
+  set m [ expr $hours * 60 + $minutes ]
+
+  return $m
+
+}
+
+
+
+
+proc time_offset {} {
+
+  return [ clock scan "1970-01-01 00:00:00" -format "%Y-%m-%d %H:%M:%S" ]
+
+}
+
+
+
+
+proc time_in_secs { s } {
+
+  return [ expr [ clock scan $s -format "%Y-%m-%d %H:%M:%S" ] - [ time_offset ] ]
+
+}
+
+
+
+
+proc calc_time { base time } {
+
+  if { [ string first ":" $time ] == -1 } {
+
+    set s [ expr ( [ time_in_minutes $base ] + $time ) * 60 ]
+    return [ clock format $s -format %H:%M -gmt true ]
+  }
+
+  set part [ split $time ":" ]
+  scan [ lindex $part 0 ] %d hours
+  scan [ lindex $part 1 ] %d minutes
+  set s [ expr $hours % 24 * 3600 + $minutes % 60 * 60 ]
+
+  return [ clock format $s -format %H:%M -gmt true ]
+
+}
+
+
+
+
+proc build_week_mask { b } {
+
+  global WEEKDAYS
+
+  set rv ""
+
+  for { set i 0 } { $i < 7 } { incr i } {
+
+    set day [ string range $WEEKDAYS $i $i ]
+    if { [ expr $b & 1 ] == 1 } {
+      append rv $day
+    } else {
+      append rv "_"
+    }
+
+    set b [ expr $b >> 1 ]
+  }
+
+  return $rv
+
+}
+
+
+
+
+proc sameday_week_mask {} {
+
+  global WEEKDAYS
+
+  set rv "_______"
+  set d [ clock format [ clock seconds ] -format "%w" ]
+  set rv [ string replace $rv $d $d [ string range $WEEKDAYS $d $d ] ]
+
+  return $rv
+
+}
+
+
+
+
+proc byte_for_week_mask { week_mask } {
+
+  global WEEKDAYS
+
+  set b 0
+  for { set i 6 } { $i >= 0 } { incr i -1 } {
+    if { [ string range $WEEKDAYS $i $i ] == [ string range $week_mask $i $i ] } {
+      set b [ expr $b | 1 ]
+    }
+    set b [ expr $b << 1 ]
+  }
+  set b [ expr $b >> 1 ]
+
+  return $b
+
+}
+
+
+
+
+proc endian { v } {
+
+  set b1 [ expr $v & 255 ]
+  set b2 [ expr $v >> 8 ]
+
+  return [ expr $b1 << 8 | $b2 ]
+
+}
+
+
+
+
+proc ascii { bytes } {
+
+  set s ""
+
+  foreach b $bytes {
+
+    if { $b == 0 } {
+      break
+    }
+
+    append s [ format %c $b ]
+  }
+
+  return $s
+
+}
+
+
+
+
+proc get_secret { mac } {
+
+  set mask { 105 76 111 103 105 99 }
+  set bytes_mac {}
+
+  foreach h [ split $mac ":" ] {
+    set d [ hex_to_decimal $h ]
+    lappend bytes_mac [ hex_to_decimal $h ]
+  }
+
+  set i 0
+  set secret 0
+  foreach b [ lreverse $bytes_mac ] {
+    set secret [ expr $secret + (($b ^ [lindex $mask $i]) & 255) ]
+    incr i
+  }
+
+  return $secret
+
+}
+
+
+
+
+proc init { level } {
+
+  global INIT
+  global HANDLE
+  global sem
+
+  if { ( $sem(initialized) & $INIT(connect) ) != $INIT(connect) } {
+
+    set sem(initialized) [ gatt_connect $sem(mac) ]
+
+    if { $sem(initialized) != $INIT(connect) } {
+
+      puts stderr "ERROR:\tConnection failed"
+      exit -1
+
+    } else {
+
+      # sync and authorize
+      set synced [ req_sync ]
+
+      if { ( $synced & $INIT(auth) ) != $INIT(auth) } {
+
+        puts stderr "ERROR:\tAuthorization failed"
+        exit -1
+
+      } else {
+
+        set sem(initialized) [ expr $sem(initialized) | $INIT(auth) ]
+
+      }
+
+    }
+
+  }
+
+  if { ( $level & $INIT(device) ) == $INIT(device) && ( $sem(initialized) & $INIT(device) ) != $INIT(device) } {
+
+    set device [ req_device ]
+    set sem(initialized) [ expr $sem(initialized) | $device]
+
+  }
+
+  if { ( $level & $INIT(subscribe_cmd) ) == $INIT(subscribe_cmd) && ( $sem(initialized) & $INIT(subscribe_cmd) ) != $INIT(subscribe_cmd) } {
+
+    set subscribe_cmd [ req_subscribe_notification $HANDLE(subscribe_cmd) 1 ]
+    if { $subscribe_cmd == 1 } {
+
+      set sem(initialized) [ expr $sem(initialized) | $INIT(subscribe_cmd) ]
+
+    }
+
+  }
+
+  if { ( $level & $INIT(subscribe_measures) ) == $INIT(subscribe_measures) && ( $sem(initialized) & $INIT(subscribe_measures) ) != $INIT(subscribe_measures) } {
+
+    set subscribe_measures [ req_subscribe_notification $HANDLE(subscribe_measures) 1 ]
+    if { $subscribe_measures == 1 } {
+
+      set sem(initialized) [ expr $sem(initialized) | $INIT(subscribe_measures) ]
+
+    }
+
+  }
+
+  return $sem(initialized)
+
+}
+
+
+
+
+proc gatt_connect { mac } {
+
+  global INIT
+  global DELAY
+
+  log "INFO:\tTry to connect to $mac"
+
+  expect "\[LE\]"
+  send "connect $mac\r"
+  expect "Connection successful" {
+    after $DELAY
+    log "INFO:\tConnected to $mac"
+    return $INIT(connect)
+  }
+  log "ERROR:\tConnection failed"
+  return 0
+
+}
+
+
+
+
+proc gatt_disconnect {} {
+
+  global sem
+
+  log "INFO:\tDisconnect from $sem(mac)"
+
+  send "disconnect\r"
+
+}
+
+
+
+
+proc read_handle { hnd } {
+
+  global DELAY
+
+  set hnd_hex [ decimal_to_hex $hnd ]
+
+  log "INFO:\t>>>\tchar-read-hnd $hnd_hex"
+
+  send "char-read-hnd $hnd_hex\r"
+
+  expect {
+    -indices -re "Characteristic value/descriptor: (\[0-9a-f\ \]*)\r" {
+      after $DELAY
+      set buffer $expect_out(1,string)
+      log "INFO:\t<<<\tCharacteristic value/descriptor = $buffer"
+    }
+    timeout {
+      log "WARN:\tTimeout. Characteristic value/descriptor not received"
+    }
+  }
+
+  # convert notification to byte list
+  set bytes {}
+  foreach s $buffer {
+    set check [ regexp {^[0-9A-Fa-f]+} $s ]
+    if { $check == 0 } {
+      continue
+    }
+    lappend bytes [ hex_to_decimal $s ]
+  }
+  if { [ llength $bytes ] == 0 } {
+    continue
+  }
+
+  return $bytes
+
+}
+
+
+
+
+proc gatt_char_write_req { handle bytes notification_level } {
+
+  global NOTIFIED
+  global DELAY
+  set rv -1
+
+  set hnd_hex [ decimal_to_hex $handle ]
+  set value ""
+  foreach b $bytes {
+    append value [ decimal_to_hex $b ]
+  }
+
+  log "INFO:\t>>>\tchar-write-req $hnd_hex $value"
+
+  send "char-write-req $hnd_hex $value\r"
+
+  if { $notification_level > $NOTIFIED(none) } {
+    return [ gatt_grab_notification_handle $notification_level ]
+  }
+
+  expect {
+    "Characteristic value was written successfully" {
+      log "INFO:\tOK"
+      set rv 0
+    }
+  }
+
+  after $DELAY
+
+  return $rv
+
+}
+
+
+
+
+proc gatt_grab_notification_handle { notification_level } {
+
+  global REQ_COMMAND
+  global NOTIFY
+  global DELAY
+
+  set notified 0
+
+  # loop until every type of notification is collected
+  set retry 5
+  while { [ expr $notified & $notification_level ] != $notification_level && $retry >= 0 } {
+
+    log "INFO:\tWait for notification ($retry)"
+
+    incr retry -1
+    expect {
+      -indices -re "Notification handle = 0x(.*)\r" {
+        after $DELAY
+        set buffer $expect_out(1,string)
+        log "INFO:\t<<<\tNotification handle = 0x$buffer"
+      }
+      timeout {
+        log "WARN:\tTimeout. Notification not received"
+        continue
+      }
+    }
+
+    # convert notification to byte list
+    set bytes {}
+    foreach s $buffer {
+      set check [ regexp {^[0-9A-Fa-f]+} $s ]
+      if { $check == 0 } {
+        continue
+      }
+      lappend bytes [ hex_to_decimal $s ]
+    }
+    if { [ llength $bytes ] == 0 } {
+      continue
+    }
+
+    # do the right thing with this specific notification
+    set handle [ lindex $bytes 0 ]
+    set bytes [ lreplace $bytes 0 0 ]
+    log "INFO: Handle $handle, Bytes $bytes"
+
+    if { $handle == $NOTIFY(measurement) && [ llength $bytes ] == 16 } {
+
+      # measurement
+      set notified [ expr $notified | [ parse_measurement $bytes ] ]
+
+    } elseif { $handle == $NOTIFY(cmd) && [ llength $bytes ] == 8 && [ lindex $bytes 0 ] == $REQ_COMMAND(scheduler) } {
+
+      # scheduler notification
+      set notified [ expr $notified | [ parse_scheduler $bytes ] ]
+
+    } elseif { $handle == $NOTIFY(cmd) && [ llength $bytes ] == 4 && [ lindex $bytes 0 ] == $REQ_COMMAND(countdown) } {
+
+      # countdown notification
+      set notified [ expr $notified | [ parse_countdown $bytes ] ]
+
+    } elseif { $handle == $NOTIFY(cmd) && [ llength $bytes ] == 4 && [ lindex $bytes 0 ] == $REQ_COMMAND(overload) } {
+
+      # overload notification
+      set notified [ expr $notified | [ parse_overload $bytes ] ]
+
+    } elseif { $handle == $NOTIFY(cmd) && [ llength $bytes ] == 4 && [ lindex $bytes 0 ] == $REQ_COMMAND(standby) } {
+
+      # standby notification
+      set notified [ expr $notified | [ parse_standby $bytes ] ]
+
+    } elseif { $handle == $NOTIFY(cmd) && [ llength $bytes ] == 4 && [ lindex $bytes 0 ] == $REQ_COMMAND(uptime) } {
+
+      # power-on uptime notification
+      set notified [ expr $notified | [ parse_uptime $bytes ] ]
+
+    } elseif { $handle == $NOTIFY(cmd) && [ llength $bytes ] == 17 && [ lindex $bytes 0 ] == $REQ_COMMAND(consumption) } {
+
+      # power-on consumption notification
+      set notified [ expr $notified | [ parse_consumption $bytes ] ]
+
+    } elseif { $handle == $NOTIFY(cmd) && ( [ lindex $bytes 0 ] == $REQ_COMMAND(data_hour) || [ lindex $bytes 0 ] == $REQ_COMMAND(data_minute) ) } {
+
+      # recorded data notification
+      set notified [ expr $notified | [ parse_data $bytes ] ]
+
+    } else {
+
+      log "WARNING:\tUnknown notification received, 0x$buffer"
+
+    }
+
+  }
+
+  return $notified
+
+}
+
+
+
+
+proc req_sync {} {
+
+  global HANDLE
+  global NOTIFIED
+  global REQ_COMMAND
+  global INIT
+  global sem
+
+  set datetime [ current_datetime ]
+
+  set bytes {}
+
+  log "INFO:\tSync SEM"
+
+  # Byte 1: Sync command
+  lappend bytes $REQ_COMMAND(sync)
+
+  # Byte 2-3: Year
+  lappend bytes [ endian [ lindex $datetime 0 ] ]
+
+  # Byte 4: Month
+  lappend bytes [ lindex $datetime 1 ]
+
+  # Byte 5: Day in month
+  lappend bytes [ lindex $datetime 2 ]
+
+  # Byte 6: Hour of day
+  lappend bytes [ lindex $datetime 3 ]
+
+  # Byte 7: Minutes
+  lappend bytes [ lindex $datetime 4 ]
+
+  # Byte 8: Seconds
+  lappend bytes [ lindex $datetime 5 ]
+
+  # Byte 9-10: Secret key
+  lappend bytes [ endian $sem(secret) ]
+
+  set rv [ gatt_char_write_req $HANDLE(cmd) $bytes $NOTIFIED(none) ]
+
+  if { $rv != -1 } {
+
+    log "INFO:\tSEM synced successfully"
+    return $INIT(auth)
+
+  } else {
+
+    log "ERROR:\tSynchronization of SEM failed"
+    return 0
+
+  }
+
+}
+
+
+
+
+proc req_switch { s } {
+
+  global HANDLE
+  global NOTIFIED
+  global REQ_COMMAND
+  global sem
+
+  set bytes {}
+
+  log "INFO:\tSwitch SEM [ expr $s == 1 ? "on" : "off" ]"
+
+  # Byte 1: Switch command
+  lappend bytes $REQ_COMMAND(switch)
+
+  # Byte 2: Turn on (1) / turn off (0)
+  set s [ expr $s == 1 ? 1 : 0 ]
+  lappend bytes $s
+
+  set rv [ gatt_char_write_req $HANDLE(cmd) $bytes $NOTIFIED(none) ]
+
+  if { $rv != -1 } {
+
+    log "INFO:\tSEM successfully switched"
+    set sem(power) $s
+    return 0
+
+  } else {
+
+    log "ERROR:\tSwitching SEM failed"
+    return -1
+  }
+
+}
+
+
+
+
+proc req_subscribe_notification { handle s } {
+
+  global NOTIFIED
+  global sem
+
+  set bytes {}
+
+  log "INFO:\tSubscribe for notification handle 0x[ decimal_to_hex $handle ]"
+
+  # Byte 1: Subscribe/unsubscribe command
+  set s [ expr $s == 1 ? 1 : 0 ]
+  lappend bytes $s
+
+  # Byte 2: static 0
+  lappend bytes 0
+
+  set rv [ gatt_char_write_req $handle $bytes $NOTIFIED(none) ]
+
+  if { $rv != -1 } {
+
+    log "INFO:\tSuccessfully subscripted to notification handle 0x[ decimal_to_hex $handle ]"
+    return $s
+
+  } else {
+
+    log "ERROR:\tSubscription to notification handle 0x[ decimal_to_hex $handle ] failed"
+    return 0
+
+  }
+
+}
+
+
+
+proc req_scheduler { i } {
+
+  global HANDLE
+  global NOTIFIED
+  global REQ_COMMAND
+  global sem
+
+  set bytes {}
+  set i [ expr $i % 6 ]
+
+  log "INFO:\tRequest scheduler [ expr $i + 1 ]"
+
+  # Byte 1: Scheduler command
+  lappend bytes $REQ_COMMAND(scheduler)
+
+  # Byte 2: id of scheduler
+  lappend bytes $i
+
+  # Byte 3-4: static
+  lappend bytes 0
+  lappend bytes 5
+
+  set rv [ gatt_char_write_req $HANDLE(cmd) $bytes $NOTIFIED(scheduler) ]
+  if { [ expr $rv & $NOTIFIED(scheduler) ] == $NOTIFIED(scheduler) } {
+
+    log "INFO:\tScheduler successfully requested"
+    return 0
+
+  } else {
+
+    log "ERROR:\tReceiving scheduler state failed."
+    return -1
+
+  }
+
+}
+
+
+
+
+proc parse_scheduler { bytes } {
+
+  global sem
+  global REQ_COMMAND
+  global NOTIFIED
+
+  if { [ lindex $bytes 0 ] != $REQ_COMMAND(scheduler) && [ llength $bytes ] != 8 } {
+    return 0
+  }
+
+  set i [ lindex $bytes 1 ]
+
+  set sem("scheduler_active_$i")       [ expr [ lindex $bytes 3 ] >> 7 ]
+  set sem("scheduler_daymask_$i")      [ build_week_mask [ lindex $bytes 3 ] ]
+  set sem("scheduler_start_$i")        [ format %2.2d [ expr [ lindex $bytes 4 ] & 127 ] ]:[ format %2.2d [ lindex $bytes 5 ] ]
+  set sem("scheduler_start_action_$i") [ expr [ lindex $bytes 4 ] >> 7 ]
+  set sem("scheduler_stop_$i")         [ format %2.2d [ expr [ lindex $bytes 6 ] & 127 ] ]:[ format %2.2d [ lindex $bytes 7 ] ]
+  set sem("scheduler_stop_action_$i")  [ expr [ lindex $bytes 6 ] >> 7 ]
+
+  log [ print_scheduler $i ]
+
+  return $NOTIFIED(scheduler)
+
+}
+
+
+
+
+proc print_scheduler { i } {
+
+  global sem
+
+  if { [ info exists sem("scheduler_stop_$i") ] == 0 } {
+    return ""
+  }
+
+  append out "\tScheduler [ expr $i + 1 ]:\n"
+  append out "\t  Active:         [ expr $sem("scheduler_active_$i") == 1 ? "on" : "off" ]\n"
+  append out "\t  Begin:          $sem("scheduler_start_$i") turn [ expr $sem("scheduler_start_action_$i") == 1 ? "on" : "off" ]\n"
+  append out "\t  End:            $sem("scheduler_stop_$i") turn [ expr $sem("scheduler_stop_action_$i") == 1 ? "on" : "off" ]\n"
+  append out "\t  Weekdays:       $sem("scheduler_daymask_$i")\n"
+  append out "\n"
+
+  return $out
+
+}
+
+
+
+
+proc set_scheduler { i active start start_action stop stop_action week_mask } {
+
+  global HANDLE
+  global NOTIFIED
+  global REQ_COMMAND
+  global sem
+
+  set bytes {}
+  set i [ expr $i % 6 ]
+
+  log "INFO:\tSet scheduler [ expr $i + 1 ]"
+
+  # Byte 1: Scheduler command
+  lappend bytes $REQ_COMMAND(set_scheduler)
+
+  # Byte 2: id of scheduler
+  lappend bytes $i
+
+  # Byte 3: always 0
+  lappend bytes 0
+
+  # Byte 4: Bits 1 - 7: Bits for weekdays from Sunday to Saturdays
+  #         Bit 8: Flag for active or inactive scheduler
+  lappend bytes [ expr [ byte_for_week_mask $week_mask ] | $active << 7 ]
+
+  # Byte 5: Bits 1 - 5: Starting hour
+  #         Bit 8: Flag for action (1 = turn on, 0 = turn off)
+  lappend bytes [ expr ( [ time_in_minutes $start ] / 60 ) | $start_action << 7 ]
+
+  # Byte 6: Starting minutes
+  lappend bytes [ expr ( [ time_in_minutes $start ] % 60 ) ]
+
+  # Byte 7: Ending hour
+  lappend bytes [ expr ( [ time_in_minutes $stop ] / 60 ) | $stop_action << 7 ]
+
+  # Byte 8: Ending minutes
+  lappend bytes [ expr ( [ time_in_minutes $stop ] % 60 ) ]
+
+  set rv [ gatt_char_write_req $HANDLE(cmd) $bytes $NOTIFIED(none) ]
+
+  if { $rv != -1 } {
+
+    set sem("scheduler_active_$i")       $active
+    set sem("scheduler_daymask_$i")      $week_mask
+    set sem("scheduler_start_$i")        $start
+    set sem("scheduler_start_action_$i") $start_action
+    set sem("scheduler_stop_$i")         $stop
+    set sem("scheduler_stop_action_$i")  $stop_action
+
+    log "INFO:\tScheduler successfully set"
+    log [ print_scheduler $i ]
+
+    return 0
+
+  } else {
+
+    log "ERROR:\Setting scheduler failed"
+    return -1
+
+  }
+
+}
+
+
+
+
+proc capture_countdown {} {
+
+  global NOTIFIED
+  global sem
+
+  set rv [ gatt_grab_notification_handle $NOTIFIED(countdown) ]
+
+  if { [ expr $rv & $NOTIFIED(countdown) ] == $NOTIFIED(countdown) } {
+
+    log "INFO:\tCountdown successfully captured"
+    return 0
+
+  } else {
+
+    log "ERROR:\tCapturing countdown failed"
+    return -1
+
+  }
+
+}
+
+
+
+
+proc parse_countdown { bytes } {
+
+  global sem
+  global REQ_COMMAND
+  global NOTIFIED
+
+  if { [ lindex $bytes 0 ] != $REQ_COMMAND(countdown) && [ llength $bytes ] != 4 } {
+    return 0
+  }
+
+  set sem(countdown)         1
+  set sem(countdown_runtime) [ format %2.2d [ expr [ lindex $bytes 1 ] & 127 ] ]:[ format %2.2d [ lindex $bytes 2 ] ]:[ format %2.2d [ lindex $bytes 3 ] ]
+  set sem(countdown_action)  [ expr [ lindex $bytes 1 ] >> 7 ]
+
+  log [ print_countdown ]
+
+  return $NOTIFIED(countdown)
+
+}
+
+
+
+
+proc print_countdown {} {
+
+  global sem
+
+  set out ""
+
+  if { [ info exists sem(countdown_action) ] != 0 } {
+    append out "\tCountdown:        on\n"
+    append out "\t  Action:         [ expr $sem(countdown_action) == 1 ? "on" : "off" ]\n"
+    append out "\t  Remaining:      $sem(countdown_runtime)\n"
+    append out "\t  ETA:            [ calc_time [ current_time_str ] [ time_in_minutes $sem(countdown_runtime) ] ]\n"
+    append out "\n"
+  }
+
+  return $out
+
+}
+
+
+
+
+proc set_countdown { action runtime } {
+
+  global HANDLE
+  global NOTIFIED
+  global REQ_COMMAND
+  global sem
+
+  set bytes {}
+
+  log "INFO:\tSet countdown"
+
+  # Byte 1: Countdown command
+  lappend bytes $REQ_COMMAND(countdown)
+
+  # Byte 2: Bits 1 - 5: Runtime hour
+  #         Bit 8: Flag for action (1 = turn on, 0 = turn off)
+  lappend bytes [ expr ( [ time_in_minutes $runtime ] / 60 ) | $action << 7 ]
+
+  # Byte 3: Runtime minutes
+  lappend bytes [ expr ( [ time_in_minutes $runtime ] % 60 ) ]
+
+  set rv [ gatt_char_write_req $HANDLE(cmd) $bytes $NOTIFIED(none) ]
+
+  if { $rv != -1 } {
+    set sem(countdown)         1
+    set sem(countdown_action)  $action
+    set sem(countdown_runtime) $runtime
+
+    log "INFO:\tCountdown successfully set"
+    return 0
+
+  } else {
+
+    log "ERROR:\tSet countdown failed"
+    return -1
+
+  }
+
+}
+
+
+
+
+proc capture_measurement {} {
+
+  global NOTIFIED
+
+  set rv [ gatt_grab_notification_handle $NOTIFIED(measurement) ]
+
+  if { [ expr $rv & $NOTIFIED(measurement) ] == $NOTIFIED(measurement) } {
+
+    log "INFO:\tMeasurement successfully captured"
+    return 0
+
+  } else {
+
+    log "ERROR:\tCapturing measurement failed"
+    return -1
+
+  }
+
+}
+
+
+
+
+proc parse_measurement { bytes } {
+
+  global sem
+  global NOTIFIED
+
+  if { [ llength $bytes ] != 16 } {
+
+    return 0
+
+  }
+
+  set sem(power)     [ expr [ lindex $bytes 0 ] & 1 ]
+  set sem(countdown) [ expr ( [ lindex $bytes 0 ] & 2 ) >> 1 ]
+
+  # convert back to "hex"
+  set n {}
+  foreach b $bytes {
+    lappend n [ decimal_to_hex $b ]
+  }
+
+  # Voltage
+  set sem(latest_voltage) [ convert_measurement [ lindex $n 3 ] [ lindex $n 2 ] [ lindex $n 1 ] ]
+
+  # Ampere
+  set sem(latest_ampere) [ convert_measurement [ lindex $n 6 ] [ lindex $n 5 ] [ lindex $n 4 ] ]
+
+  # Watts
+  set sem(latest_watts) [ convert_measurement [ lindex $n 9 ] [ lindex $n 8 ] [ lindex $n 7 ] ]
+
+  # Power factor
+  set sem(latest_factor) [ convert_measurement [ lindex $n 12 ] [ lindex $n 11 ] [ lindex $n 10 ] ]
+
+  # Frequency
+  set sem(latest_frequency) [ convert_measurement [ lindex $n 15 ] [ lindex $n 14 ] [ lindex $n 13 ] ]
+
+  log [ print_measurement ]
+
+  return $NOTIFIED(measurement)
+
+}
+
+
+
+
+proc convert_measurement {n n100 f} {
+
+  scan $n %d n
+  scan $n100 %d n100
+  scan $f %d f
+
+  set rv [ expr ( $n100 * 100 + $n ) ]
+  set rv [ expr $rv / pow(10, 4 - $f) ]
+  return $rv
+
+}
+
+
+
+
+proc print_measurement {} {
+
+  global sem
+
+  if { [ info exists sem(latest_voltage) ] == 0 } {
+    return ""
+  }
+
+  append out "\tStatus:\n"
+  append out "\t  Power:          [ expr $sem(power) == 1 ? "on" : "off" ]\n"
+  append out "\t  Countdown:      [ expr $sem(countdown) == 1 ? "on" : "off" ]\n"
+  append out "\t  Voltage:        $sem(latest_voltage) VAC\n"
+  append out "\t  Ampere:         $sem(latest_ampere) A\n"
+  append out "\t  Watts:          $sem(latest_watts) W\n"
+  append out "\t  Frequency:      $sem(latest_frequency) Hz\n"
+  append out "\t  Power factor:   $sem(latest_factor)\n"
+  append out "\n"
+
+  return $out
+
+}
+
+
+
+
+proc json_measurement {} {
+
+  global sem
+
+  if { [ info exists sem(latest_voltage) ] == 0 } {
+    return "  \"status\" : null"
+  }
+
+  append out "  \"status\" : {\n"
+  append out "    \"power\" : $sem(power),\n"
+  append out "    \"voltage\" : $sem(latest_voltage),\n"
+  append out "    \"ampere\" : $sem(latest_ampere),\n"
+  append out "    \"watts\" : $sem(latest_watts),\n"
+  append out "    \"frequency\" : $sem(latest_frequency),\n"
+  append out "    \"factor\" : $sem(latest_factor)\n"
+  append out "  }"
+
+  return $out
+
+}
+
+
+
+
+proc json_consumption {} {
+
+  global sem
+
+  if { $sem(consumption) < 0 || $sem(uptime) < 0 } {
+    return "  \"consumption\" : null"
+  }
+
+  set _s [ expr round( 10 * $sem(consumption) / ( $sem(uptime) / 60.0 ) ) / 10.0 ]
+  set _per_year [ expr round( 525600 * $sem(consumption) / 1000.0 / $sem(uptime) ) ]
+
+  append out "  \"consumption\" : \{\n"
+  append out "    \"uptime\" : $sem(uptime),\n"
+  append out "    \"consumption\" : $sem(consumption),\n"
+  append out "    \"avg\" : $_s,\n"
+  append out "    \"est\" : $_per_year\n"
+  append out "  \}"
+
+  return $out
+
+}
+
+
+
+
+proc json_scheduler {} {
+
+  global sem
+
+  append out "  \"schedulers\" : \[\n"
+
+  for { set i 0 } { $i < 6 } { incr i } {
+
+    if { [ info exists sem("scheduler_stop_$i") ] == 0 } {
+      continue
+    }
+
+    append out "    \{\n"
+    append out "       \"id\" : [ expr $i + 1 ],\n"
+    append out "       \"active\": $sem("scheduler_active_$i"),\n"
+    append out "       \"start_time\" : \"$sem("scheduler_start_$i")\",\n"
+    append out "       \"start_action\" : $sem("scheduler_start_action_$i"),\n"
+    append out "       \"stop_time\" : \"$sem("scheduler_stop_$i")\",\n"
+    append out "       \"stop_action\" : $sem("scheduler_stop_action_$i"),\n"
+    append out "       \"weekdays\" : \"$sem("scheduler_daymask_$i")\"\n"
+
+    if { $i == 5 } {
+      append out "    \}\n"
+    } else {
+      append out "    \},\n"
+    }
+
+  }
+
+  append out "  \]"
+
+  return $out
+
+}
+
+
+
+
+proc json_countdown {} {
+
+  global sem
+
+  if { [ info exists sem(countdown_action) ] > 0 } {
+    append out "  \"countdown\" : \{\n"
+    append out "    \"active\" : 1,\n"
+    append out "    \"action\" : $sem(countdown_action),\n"
+    append out "    \"remaining\" : \"$sem(countdown_runtime)\",\n"
+    append out "    \"eta\" : \"[ calc_time [ current_time_str ] [ time_in_minutes $sem(countdown_runtime) ] ]\"\n"
+    append out "  \}"
+  } else {
+    append out "  \"countdown\" : \{\n"
+    append out "    \"active\" : 0\n"
+    append out "  \}"
+  }
+
+  return $out
+
+}
+
+
+
+
+proc json_overload {} {
+
+  global sem
+
+  if { $sem(overload) != -1 } {
+    append out "  \"overload\" : \{\n"
+    append out "    \"threshold\" : $sem(overload),\n"
+    if { $sem(overload_turnoff) == 1 } {
+      append out "    \"action\" : \"off\",\n"
+    } else {
+      append out "    \"action\" : \"LED\",\n"
+    }
+
+    append out "    \"alarm\" : $sem(overload_alarm)\n"
+    append out "  \}"
+  } else {
+    append out "  \"overload\" : null"
+  }
+
+  return $out
+
+}
+
+
+
+proc json_standby {} {
+
+  global sem
+
+  if { $sem(standby) != -1 } {
+    append out "  \"standby\" : \{\n"
+    append out "    \"threshold\" : $sem(standby),\n"
+    if { $sem(standby_active) == 1 } {
+      append out "    \"action\" : \"off\"\n"
+    } else {
+      append out "    \"action\" : \"LED\"\n"
+    }
+    append out "  \}"
+  } else {
+    append out "  \"standby\" : null"
+  }
+
+  return $out
+
+}
+
+
+
+proc json_data_hours {} {
+
+  global data_per_hour
+
+  set out "  \"data_per_hour\" : \[\n"
+
+  set size [ array size data_per_hour ]
+  set i 0
+
+  foreach d [ lsort [ array names data_per_hour ] ] {
+
+    incr i
+
+    append out "    \{\n"
+    append out "      \"timestamp\" : \"[ datetime_str [ expr $d * 3600 ] ]\",\n"
+    append out "      \"consumption\" : $data_per_hour($d)\n"
+
+    if { $i == $size } {
+      append out "    \}"
+    } else {
+      append out "    \},\n"
+    }
+  }
+
+  append out "  \]"
+
+  return $out
+
+}
+
+
+
+
+proc json_data_minutes {} {
+
+  global data_per_minute
+
+  set out "  \"data_per_minute\" : \[\n"
+
+  set size [ array size data_per_minute ]
+  set i 0
+
+  foreach d [ lsort [ array names data_per_minute ] ] {
+
+    incr i
+
+    append out "    \{\n"
+    append out "      \"timestamp\" : \"[ datetime_str [ expr $d * 60 ] ]\",\n"
+    append out "      \"consumption\" : $data_per_minute($d)\n"
+
+    if { $i == $size } {
+      append out "    \}"
+    } else {
+      append out "    \},\n"
+    }
+  }
+
+  append out "  \]"
+
+  return $out
+
+}
+
+
+
+
+proc print_measurement_as_csv {} {
+
+  global sem
+
+  append out [ current_datetime_str ]
+  append out "\t$sem(power)\t$sem(countdown)\t$sem(latest_voltage)\t$sem(latest_ampere)"
+  append out "\t$sem(latest_watts)\t$sem(latest_frequency)\t$sem(latest_factor)"
+
+  return $out
+
+}
+
+
+
+
+proc req_overload { } {
+
+  global HANDLE
+  global NOTIFIED
+  global REQ_COMMAND
+  global sem
+
+  set bytes {}
+
+  log "INFO:\tRequest overload settings"
+
+  # Byte 1: Overload command
+  lappend bytes $REQ_COMMAND(overload)
+
+  set rv [ gatt_char_write_req $HANDLE(cmd) $bytes $NOTIFIED(overload) ]
+  if { [ expr $rv & $NOTIFIED(overload) ] == $NOTIFIED(overload) } {
+
+    log "INFO:\tOverload settings successfully requested"
+    return 0
+
+  } else {
+
+    log "ERROR:\tReceiving overload settings failed"
+    return -1
+
+  }
+
+}
+
+
+
+
+proc parse_overload { bytes } {
+
+  global sem
+  global REQ_COMMAND
+  global NOTIFIED
+
+  if { [ lindex $bytes 0 ] != $REQ_COMMAND(overload) && [ llength $bytes ] != 4 } {
+    return 0
+  }
+
+  set sem(overload)         [ expr [ lindex $bytes 2 ] + [ lindex $bytes 3 ] * 256 ]
+  set sem(overload_turnoff) [ expr ( [ lindex $bytes 1 ] & 128 ) >> 7 ]
+  set sem(overload_alarm)   [ expr ( [ lindex $bytes 1 ] & 64 ) >> 6 ]
+
+  log [ print_overload ]
+
+  return $NOTIFIED(overload)
+
+}
+
+
+
+
+proc print_overload {} {
+
+  global sem
+
+  set out ""
+
+  if { $sem(overload) != -1 } {
+    append out "\tOverload:\n"
+    append out "\t  Threshold:      $sem(overload) W\n"
+    if { $sem(overload_turnoff) == 1 } {
+      append out "\t  Action:         turn off\n"
+    } else {
+      append out "\t  Action:         LED\n"
+    }
+
+    append out "\t  Alarm:          [ expr $sem(overload_alarm) == 1 ? "yes" : "no" ]\n"
+    append out "\n"
+  }
+
+  return $out
+
+}
+
+
+
+
+proc set_overload { threshold turnoff alarm } {
+
+  global HANDLE
+  global NOTIFIED
+  global REQ_COMMAND
+  global sem
+
+  set bytes {}
+
+  log "INFO:\tSet overload"
+
+  if { $threshold > 3699 } {
+    set threshold 3699
+  }
+
+  # Byte 1: Overload command
+  lappend bytes $REQ_COMMAND(set_overload)
+
+  # Byte 2: Bit 7: Alarm
+  #         Bit 8: Turnoff
+  lappend bytes [ expr $turnoff << 7 | $alarm << 6 ]
+
+  # Byte 3: Threshold in watts
+  lappend bytes [ expr $threshold & 255 ]
+
+  # Byte 4: Threshold in watts
+  lappend bytes [ expr $threshold >> 8 ]
+
+  set rv [ gatt_char_write_req $HANDLE(cmd) $bytes $NOTIFIED(none) ]
+
+  if { $rv != -1 } {
+    set sem(overload)         $threshold
+    set sem(overload_turnoff) $turnoff
+    set sem(overload_alarm)   $alarm
+
+    log "INFO:\tOverload successfully set"
+    return 0
+
+  } else {
+
+    log "ERROR:\tSet overload failed"
+    return -1
+
+  }
+
+}
+
+
+
+
+proc req_standby { } {
+
+  global HANDLE
+  global NOTIFIED
+  global REQ_COMMAND
+  global sem
+
+  set bytes {}
+
+  log "INFO:\tRequest standby settings"
+
+  # Byte 1: Standby command
+  lappend bytes $REQ_COMMAND(standby)
+
+  set rv [ gatt_char_write_req $HANDLE(cmd) $bytes $NOTIFIED(standby) ]
+  if { [ expr $rv & $NOTIFIED(standby) ] == $NOTIFIED(standby) } {
+
+    log "INFO:\tStandby settings successfully requested"
+    return 0
+
+  } else {
+
+    log "ERROR:\tReceiving standby settings failed"
+    return -1
+
+  }
+
+}
+
+
+
+
+proc parse_standby { bytes } {
+
+  global sem
+  global REQ_COMMAND
+  global NOTIFIED
+
+  if { [ lindex $bytes 0 ] != $REQ_COMMAND(standby) && [ llength $bytes ] != 4 } {
+    return 0
+  }
+
+  set sem(standby)         [ expr ( [ lindex $bytes 2 ] + [ lindex $bytes 3 ] * 256 ) / 1000.0 ]
+  set sem(standby_active)  [ expr ( [ lindex $bytes 1 ] & 128 ) >> 7 ]
+
+  log [ print_standby ]
+
+  return $NOTIFIED(standby)
+
+}
+
+
+
+
+proc print_standby {} {
+
+  global sem
+
+  set out ""
+
+  if { $sem(standby) != -1 } {
+    append out "\tStandby:\n"
+    append out "\t  Threshold:      $sem(standby) W\n"
+    if { $sem(standby_active) == 1 } {
+      append out "\t  Action:         turn off\n"
+    } else {
+      append out "\t  Action:         LED\n"
+    }
+    append out "\n"
+  }
+
+  return $out
+
+}
+
+
+
+
+proc set_standby { threshold active } {
+
+  global HANDLE
+  global NOTIFIED
+  global REQ_COMMAND
+  global sem
+
+  set bytes {}
+
+  log "INFO:\tSet standby"
+
+  # Byte 1: Standby command
+  lappend bytes $REQ_COMMAND(set_standby)
+
+  # Byte 2: Bit 8: Turnoff
+  lappend bytes [ expr $active << 7 ]
+
+  # Range of threshold is 0 - 9.999 Watts
+  if { $threshold > 9.999 } {
+    set threshold 9999
+  } else {
+    set threshold [ expr int($threshold * 1000) ]
+  }
+
+  # Byte 3: Threshold in watts
+  lappend bytes [ expr $threshold & 255 ]
+
+  # Byte 4: Threshold in watts
+  lappend bytes [ expr $threshold >> 8 ]
+
+  set rv [ gatt_char_write_req $HANDLE(cmd) $bytes $NOTIFIED(none) ]
+
+  if { $rv != -1 } {
+    set sem(standby)         [ expr $threshold / 1000.0 ]
+    set sem(standby_active)  $active
+
+    log "INFO:\tStandby successfully set"
+    return 0
+
+  } else {
+
+    log "ERROR:\tSet standby failed"
+    return -1
+
+  }
+
+}
+
+
+
+
+proc req_uptime { } {
+
+  global HANDLE
+  global NOTIFIED
+  global REQ_COMMAND
+  global sem
+
+  set bytes {}
+
+  log "INFO:\tRequest power-on uptime"
+
+  # Byte 1: Uptime command
+  lappend bytes $REQ_COMMAND(uptime)
+
+  set rv [ gatt_char_write_req $HANDLE(cmd) $bytes $NOTIFIED(uptime) ]
+  if { [ expr $rv & $NOTIFIED(uptime) ] == $NOTIFIED(uptime) } {
+
+    log "INFO:\tPower-on uptime successfully requested"
+    return 0
+
+  } else {
+
+    log "ERROR:\tReceiving power-on uptime failed"
+    return -1
+
+  }
+
+}
+
+
+
+
+proc parse_uptime { bytes } {
+
+  global sem
+  global REQ_COMMAND
+  global NOTIFIED
+
+  if { [ lindex $bytes 0 ] != $REQ_COMMAND(uptime) && [ llength $bytes ] != 4 } {
+    return 0
+  }
+
+  set sem(uptime) [ expr ( [ lindex $bytes 1 ] + ( [ lindex $bytes 2 ] << 8 ) + ( [ lindex $bytes 3 ] << 16 ) ) ]
+
+  log [ print_uptime ]
+
+  return $NOTIFIED(uptime)
+
+}
+
+
+
+
+proc print_uptime {} {
+
+  global sem
+
+  set out ""
+  set days [ expr $sem(uptime) / 1440 ]
+  set time [ calc_time "00:00" [ expr $sem(uptime) % 1440 ] ]
+
+  if { $sem(uptime) != -1 } {
+    append out "\tUptime:           $days days, $time\n"
+  }
+
+  return $out
+
+}
+
+
+
+
+proc req_consumption { } {
+
+  global HANDLE
+  global NOTIFIED
+  global REQ_COMMAND
+  global sem
+
+  set bytes {}
+
+  log "INFO:\tRequest total power-on consumption"
+
+  # Byte 1: Consumption command
+  lappend bytes $REQ_COMMAND(consumption)
+
+  set rv [ gatt_char_write_req $HANDLE(cmd) $bytes $NOTIFIED(consumption) ]
+  if { [ expr $rv & $NOTIFIED(consumption) ] == $NOTIFIED(consumption) } {
+
+    log "INFO:\tTotal power-on consumption successfully requested"
+    return 0
+
+  } else {
+
+    log "ERROR:\tReceiving total power-on consumption failed"
+    return -1
+
+  }
+
+}
+
+
+
+
+proc parse_consumption { bytes } {
+
+  global sem
+  global REQ_COMMAND
+  global NOTIFIED
+
+  if { [ lindex $bytes 0 ] != $REQ_COMMAND(consumption) && [ llength $bytes ] != 17 } {
+    return 0
+  }
+
+  set sem(consumption) [ expr ( [ lindex $bytes 13 ] + ( [ lindex $bytes 14 ] << 8 ) + ( [ lindex $bytes 15 ] << 16 ) + ( [ lindex $bytes 16 ] << 24 ) ) ]
+
+  log [ print_consumption ]
+
+  return $NOTIFIED(consumption)
+
+}
+
+
+
+
+proc print_consumption {} {
+
+  global sem
+
+  set out ""
+
+  if { $sem(consumption) != -1 } {
+    append out "\tConsumption:      [ expr $sem(consumption) / 1000.0 ] kWh\n"
+  }
+
+  return $out
+
+}
+
+
+
+
+proc print_avg_consumption {} {
+
+  global sem
+
+  set out ""
+
+  if { $sem(consumption) != -1 && $sem(uptime) > 0 } {
+    set _s [ expr round( 10 * $sem(consumption) / ( $sem(uptime) / 60.0 ) ) / 10.0 ]
+    set _per_year [ expr round( 525600 * $sem(consumption) / 1000.0 / $sem(uptime) ) ]
+    append out "\tAvg. consumption: $_s Wh\n"
+    append out "\tEst. per year:    $_per_year kWh\n\n"
+  }
+
+  return $out
+
+}
+
+
+
+
+proc req_data { scope shift records } {
+
+  global HANDLE
+  global NOTIFIED
+  global REQ_COMMAND
+  global sem
+
+  set bytes {}
+
+  log "INFO:\tRequest recorded data"
+
+  # Byte 1: command for requesting recorded hours or minutes
+  if { $scope == $REQ_COMMAND(data_hour) } {
+
+    lappend bytes $REQ_COMMAND(data_hour)
+
+  } else {
+
+    lappend bytes $REQ_COMMAND(data_minute)
+
+  }
+
+  # Byte 2 and 3: shift records to past
+  lappend bytes [ expr $shift & 255 ]
+  lappend bytes [ expr $shift >> 8 ]
+
+  # Byte 4: records to read (max. 8)
+  if { $records > 8 } {
+    set records 8
+  }
+  lappend bytes $records
+
+  set rv [ gatt_char_write_req $HANDLE(cmd) $bytes $NOTIFIED(data) ]
+  if { [ expr $rv & $NOTIFIED(data) ] == $NOTIFIED(data) } {
+
+    log "INFO:\tRecorded data successfully requested"
+    return 0
+
+  } else {
+
+    log "ERROR:\tReceiving recorded data failed"
+    return -1
+
+  }
+
+}
+
+
+
+
+proc parse_data { bytes } {
+
+  global REQ_COMMAND
+  global NOTIFIED
+
+  global data_per_hour
+  global data_per_minute
+
+  if { [ llength $bytes ] < 3 } {
+
+    return 0
+
+  }
+
+  set time_in_minutes [ expr [ clock seconds ] / 60 ]
+
+  # Byte 1 + 2: Index of first record
+  set record [ expr [ lindex $bytes 1 ] + [ lindex $bytes 2 ] * 255 ]
+
+  # Byte 3: Count of records
+  set records [ lindex $bytes 3 ]
+
+  for { set i 0 } { $i < $records } { incr i } {
+
+    set d [ expr ( [ lindex $bytes [ expr $i * 2 + 4 ] ] + [ lindex $bytes [ expr $i * 2 + 5 ] ] * 255 ) / 10.0 ]
+
+    if { [ lindex $bytes 0 ] == $REQ_COMMAND(data_hour) } {
+
+      set index [ expr $time_in_minutes / 60 - $record - $records + $i ]
+      set data_per_hour($index) $d
+
+    } elseif { [ lindex $bytes 0 ] == $REQ_COMMAND(data_minute) } {
+
+      set index [ expr $time_in_minutes - $record - $records + $i ]
+      set data_per_minute($index) $d
+
+    }
+
+  }
+
+  return $NOTIFIED(data)
+
+}
+
+
+
+
+proc print_data_hours {} {
+
+  global data_per_hour
+
+  set out ""
+
+  foreach d [ lsort [ array names data_per_hour ] ] {
+
+    append out "[ datetime_str [ expr $d * 3600 ] ]\t$data_per_hour($d)\n"
+
+  }
+
+  return $out
+
+}
+
+
+
+
+proc print_data_minutes {} {
+
+  global data_per_minute
+
+  set out ""
+
+  foreach d [ lsort [ array names data_per_minute ] ] {
+
+    append out "[ datetime_str [ expr $d * 60 ] ]\t$data_per_minute($d)\n"
+
+  }
+
+  return $out
+}
+
+
+
+
+
+proc reset_data {} {
+
+  global HANDLE
+  global NOTIFIED
+  global REQ_COMMAND
+  global sem
+
+  set bytes {}
+
+  log "INFO:\tReset power-on uptime"
+
+  # Byte 1: Uptime command
+  lappend bytes $REQ_COMMAND(reset)
+
+  set rv [ gatt_char_write_req $HANDLE(cmd) $bytes $NOTIFIED(none) ]
+
+  if { $rv != -1 } {
+    set sem(uptime) 0
+    set sem(consumption) 0
+
+    log "INFO:\tPower-on uptime successfully reset"
+    return 0
+
+  } else {
+
+    log "ERROR:\tReset power-on uptime failed"
+    return -1
+
+  }
+
+}
+
+
+
+
+proc req_device {} {
+
+  global INIT
+  global REQ_HND
+  global sem
+
+  set sem(device_name)     [ ascii [ read_handle $REQ_HND(device_name) ] ]
+  set sem(device_serial)   [ ascii [ read_handle $REQ_HND(device_serial) ] ]
+  set sem(device_firmware) [ ascii [ read_handle $REQ_HND(device_firmware) ] ]
+  set sem(device_hardware) [ ascii [ read_handle $REQ_HND(device_hardware) ] ]
+  set sem(device_software) [ ascii [ read_handle $REQ_HND(device_software) ] ]
+  set sem(device_vendor)   [ ascii [ read_handle $REQ_HND(device_vendor) ] ]
+
+  return $INIT(device)
+
+}
+
+
+
+
+proc print_device {} {
+
+  global INIT
+  global sem
+
+  set out ""
+  if { ( $sem(initialized) & $INIT(device) ) == $INIT(device) } {
+    append out "\tMac:              $sem(mac)\n"
+    append out "\tDevice name:      $sem(device_name)\n"
+    append out "\tDevice vendor:    $sem(device_vendor)\n"
+    append out "\tDevice serial:    $sem(device_serial)\n"
+    append out "\tDevice firmware:  $sem(device_firmware)\n"
+    append out "\tDevice hardware:  $sem(device_hardware)\n"
+    append out "\tDevice software:  $sem(device_software)\n"
+    append out "\tDevice secret:    0x[decimal_to_hex $sem(secret) ]\n"
+    append out "\n"
+    append out "\tAlias:            $sem(alias)\n"
+    append out "\n"
+  }
+
+  return $out
+
+}
+
+
+
+
+proc json_device {} {
+
+  global INIT
+  global sem
+
+  set out ""
+  if { ( $sem(initialized) & $INIT(device) ) == $INIT(device) } {
+
+    append out "  \"device\" : {\n"
+    append out "    \"mac\" : \"$sem(mac)\",\n"
+    append out "    \"name\" : \"$sem(device_name)\",\n"
+    append out "    \"vendor\" : \"$sem(device_vendor)\",\n"
+    append out "    \"serial\" : \"$sem(device_serial)\",\n"
+    append out "    \"firmware\" : \"$sem(device_firmware)\",\n"
+    append out "    \"hardware\" : \"$sem(device_hardware)\",\n"
+    append out "    \"software\" : \"$sem(device_software)\",\n"
+    append out "    \"secret\" : \"0x[decimal_to_hex $sem(secret) ]\",\n"
+    append out "    \"alias\" : \"$sem(alias)\"\n"
+    append out "  }"
+
+  } else {
+
+    append out "  \"device\" : null"
+
+  }
+
+  return $out
+
+}
+
+
+
+
+proc do_command { command } {
+
+  global INIT
+  global sem
+  global verbose
+  global data_per_hour
+  global data_per_minute
+
+  switch -regexp $command {
+    ^sync$ {
+
+      init 0
+
+    }
+    ^on$ {
+
+      init 0
+      req_switch 1
+
+    }
+    ^off$ {
+
+      init 0
+      req_switch 0
+
+    }
+    ^toggle$ {
+
+      init $INIT(subscribe_measures)
+      capture_measurement
+      set s [ expr $sem(power) == 0 ? 1 : 0 ]
+      req_switch $s
+
+    }
+    ^status$ {
+
+      init $INIT(subscribe_measures)
+      capture_measurement
+
+    }
+    ^measure.*$ {
+
+      set until 0
+      if { [ llength $command ] > 1 } {
+        check_command $command 1 "measure" {^measure [0-9]+$}
+        set until [ expr [ clock seconds ] + [ lindex $command 1 ] ]
+      } else {
+        set until -1
+      }
+
+      init $INIT(subscribe_measures)
+
+      puts $sem(header_measure)
+
+      set current_seconds -1
+      while { $current_seconds < $until || $until == -1 } {
+        capture_measurement
+        puts [ print_measurement_as_csv ]
+        set current_seconds [ clock seconds ]
+      }
+
+    }
+    ^header\ measure$ {
+
+      set sem(header_measure) "Timestamp\tPower\tCountdown\tVolt (V)\tAmpere (A)\tWatt (W)\tFrequency (Hz)\tPower factor"
+
+    }
+    ^scheduler$ {
+
+      init $INIT(subscribe_cmd)
+      for { set n 0 } { $n < 6 } { incr n } {
+        req_scheduler $n
+      }
+
+    }
+    ^scheduler\ reset$ {
+
+      init $INIT(subscribe_cmd)
+      for { set n 0 } { $n < 6 } { incr n } {
+        set_scheduler $n 0 "00:00" 0 "00:00" 0 "_______"
+      }
+
+    }
+    ^scheduler.*$ {
+
+      set _c "[ lindex $command 0 ] [ lindex $command 1 ]"
+      check_command $_c 1 "scheduler" {^scheduler [1-6]$}
+
+      init $INIT(subscribe_cmd)
+
+      # index of scheduler
+      set n [ expr [ lindex $command 1 ] - 1 ]
+
+      # request current state
+      req_scheduler $n
+
+      # set / unset / reset
+      if { [ llength $command ] == 3 } {
+
+        set _c [ lindex $command 2 ]
+
+        check_command $command 2 "scheduler" {^scheduler [1-6] (set|unset|reset)$}
+
+        set start $sem("scheduler_start_$n")
+        set start_action $sem("scheduler_start_action_$n")
+        set stop $sem("scheduler_stop_$n")
+        set stop_action $sem("scheduler_stop_action_$n")
+        set week_mask $sem("scheduler_daymask_$n")
+
+        if { $_c == "set" } {
+
+          set_scheduler $n 1 $start $start_action $stop $stop_action $week_mask
+
+        } elseif { $_c == "unset" } {
+
+          set_scheduler $n 0 $start $start_action $stop $stop_action $week_mask
+
+        } elseif { $_c == "reset" } {
+
+          set_scheduler $n 0 "00:00" 0 "00:00" 0 "_______"
+
+        }
+
+      # set new scheduler
+      } elseif { [ llength $command ] > 4 } {
+
+        if { [ llength $command ] == 6 } {
+          append command " _______"
+        }
+
+        if { [ lindex $command 6 ] == "sameday" } {
+          set command [lreplace $command 6 6]
+          append command " [ sameday_week_mask ]"
+        }
+
+        check_command $command 6 "scheduler" {^scheduler [1-6] (on|off) ([0-2][0-9]:[0-5][0-9]|\+[0-9]+) (on|off) ([0-2][0-9]:[0-5][0-9]|\+[1-9][0-9]*) [Ss_][Mm_][Tt_][Ww_][Tt_][Ff_][Ss_]$}
+
+        set start [ calc_time [ current_time_str ] [ lindex $command 3 ] ]
+        set start_action [ expr [ lindex $command 2 ] == "on" ? 1 : 0 ]
+        set stop [ calc_time $start [ lindex $command 5 ] ]
+        set stop_action [ expr [ lindex $command 4 ] == "on" ? 1 : 0 ]
+        set week_mask [ lindex $command 6 ]
+
+        set_scheduler $n 1 $start $start_action $stop $stop_action $week_mask
+      }
+    }
+    ^countdown.*$ {
+
+      # query countdown state
+      if { [ llength $command ] == 1 } {
+
+        init [ expr $INIT(subscribe_cmd) | $INIT(subscribe_measures) ]
+        capture_measurement
+
+        if { $sem(countdown) == 1 } {
+          capture_countdown
+        }
+
+      # reset countdown
+      } elseif { [ llength $command ] == 2 && [ lindex $command 1 ] == "reset" } {
+
+        init 0
+        set_countdown 0 "00:00"
+
+      # set new countdown
+      } else {
+
+        check_command $command 2 "countdown" {^countdown (on|off) ([0-2][0-9]:[0-5][0-9]|\+[0-9]+)$}
+
+
+        if { [string range [ lindex $command 2 ] 0 0 ] == "+" } {
+          # countdown given in minutes
+          set runtime [ calc_time "00:00" [ lindex $command 2 ] ]
+
+        } else {
+
+          # countdown given in ETA
+          set now [ time_in_minutes [ current_time_str ] ]
+          set target [ time_in_minutes [ lindex $command 2 ] ]
+          set runtime [ calc_time "00:00" [ expr (1440 + $target - $now) % 1440 ] ]
+
+        }
+
+        set action [ expr [ lindex $command 1 ] == "on" ? 1 : 0 ]
+
+        init 0
+        set_countdown $action $runtime
+
+      }
+
+    }
+    ^overload.*$ {
+
+      if { [ llength $command ] == 1 } {
+
+        init $INIT(subscribe_cmd)
+        req_overload
+
+      } elseif { [ llength $command ] == 2 && [ lindex $command 1 ] == "off" } {
+
+        init 0
+        set_overload 0 0 0
+
+      } elseif { [ llength $command ] == 3 } {
+
+        check_command $command 2 "overload" {^overload [1-3]?[0-9]{1,3} (warn|off|alarm)$}
+
+        init 0
+        if { [ lindex $command 2 ] == "warn" } {
+          set_overload [ lindex $command 1 ] 0 0
+        } elseif { [ lindex $command 2 ] == "off" } {
+          set_overload [ lindex $command 1 ] 1 0
+        } else {
+          set_overload [ lindex $command 1 ] 0 1
+        }
+
+      } else {
+
+        check_command $command 3 "overload" {^overload [1-3]?[0-9]{1,3} (warn|off) alarm$}
+
+        init 0
+        if { [ lindex $command 2 ] == "warn" } {
+          set_overload [ lindex $command 1 ] 0 1
+        } else {
+          set_overload [ lindex $command 1 ] 1 1
+        }
+      }
+
+    }
+    ^standby.*$ {
+
+      if { [ llength $command ] == 1 } {
+
+        init $INIT(subscribe_cmd)
+        req_standby
+
+      } elseif { [ llength $command ] == 2 && [ lindex $command 1 ] == "off" } {
+
+        init 0
+        set_standby 0 0
+
+      } else {
+
+        check_command $command 1 "standby" {^standby [0-9](.[0-9]{1,3})* (warn|off)$}
+
+        init 0
+        if { [ lindex $command 2 ] == "warn" } {
+          set_standby [ lindex $command 1 ] 0
+        } else {
+          set_standby [ lindex $command 1 ] 1
+        }
+
+      }
+
+    }
+    ^uptime$ {
+
+      init $INIT(subscribe_cmd)
+      req_uptime
+
+    }
+    ^consumption$ {
+
+      init $INIT(subscribe_cmd)
+      req_consumption
+
+    }
+    ^total$ {
+
+      init $INIT(subscribe_cmd)
+      req_uptime
+      req_consumption
+
+    }
+    ^dump$ {
+
+      # init all
+      init 65535
+
+      req_device
+      req_overload
+      req_standby
+      req_consumption
+      req_uptime
+      for { set i 0 } { $i < 6 } { incr i } {
+        req_scheduler $i
+      }
+      capture_measurement
+      if { $sem(countdown) == 1 } {
+        capture_countdown
+      }
+    }
+    ^data\ hour.*$ {
+
+      set now [ time_in_secs [ current_datetime_str ] ]
+
+      # last 24h
+      if { [ llength $command ] == 2 } {
+
+        set from [ expr ( $now / 3600 - 24 ) * 3600 ]
+        set to   [ expr $now / 3600 * 3600 ]
+
+      ## all data
+      } elseif { [ llength $command ] == 3 && [ lindex $command 2 ] == "all" } {
+
+        set from [ expr $now - 7689600 ]
+        set to   [ expr $now / 3600 * 3600 ]
+
+      } else {
+
+        check_command $command 2 "data" {^data hour (-[0-9]+|2[0-9]{3}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]))( (\+[0-9]+|(2[0-9]{3}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]))))?$}
+
+        if { [ string range [ lindex $command 2 ] 0 0 ] == "-" } {
+
+          # from-date -n days ago
+          set from [ expr $now / 86400 * 86400 + 86400 * [ lindex $command 2 ] + [ time_offset ] ]
+
+        } else {
+          # specific from-date
+          set from [ time_in_secs "[ lindex $command 2 ] 00:00:00" ]
+
+        }
+
+        if { [ llength $command ] == 4 && [ string range [ lindex $command 3 ] 0 0 ] == "+" } {
+
+          # to-date is +n days after from-date
+          set to [ expr $from + 86400 * [ lindex $command 3 ] ]
+
+        } elseif { [ llength $command ] == 4 } {
+
+          # specific to date
+          set to [ expr [ time_in_secs "[ lindex $command 3 ] 00:00:00" ] + 86400 ]
+
+        } else {
+
+          # exactly day of from-date
+          set to [ expr $from + 86400 ]
+
+        }
+
+      }
+
+      # check period
+      if { $to - $now > 0 } {
+
+        puts stderr "End of period must before one hour ago."
+        exit 1
+
+      } elseif { $now - $from > 7689600 } {
+
+        puts stderr "Begin is out of range of 89 days."
+        exit 1
+
+      }
+
+      # let's go
+      init $INIT(subscribe_cmd)
+
+      set chunks  [ expr ( $to - $from ) / 3600 / 8 ]
+      set remains [ expr ( $to - $from ) / 3600 % 8 ]
+      set shift   [ expr ( $now - $to ) / 3600 ]
+
+      for { set i 0 } { $i <= $chunks } { incr i } {
+
+        set current_size [ array size data_per_hour ]
+
+        req_data 1 [ expr $i * 8 + $shift ] [ expr $i == $chunks ? $remains : 8 ]
+
+        if { [ array size data_per_hour ] == $current_size } {
+
+          break
+
+        }
+
+      }
+
+    }
+    ^data\ min.*$ {
+
+      set now [ time_in_secs [ current_datetime_str ] ]
+
+      # last hour
+      if { [ llength $command ] == 2 } {
+
+        set from [ expr ( $now / 60 - 60 ) * 60 ]
+        set to   [ expr $now / 60 * 60 ]
+
+      ## all data
+      } elseif { [ llength $command ] == 3 && [ lindex $command 2 ] == "all" } {
+
+        set from [ expr $now - 172800 ]
+        set to   [ expr $now / 60 * 60 ]
+
+      } else {
+
+        check_command $command 2 "data" {^data min -[0-9]+( \+[0-9]+)?$}
+
+        # from -n hours ago
+        set from [ expr ( $now / 60 + 60 * [ lindex $command 2 ] ) * 60 ]
+
+        if { [ llength $command ] == 4 } {
+
+          # to is +n hours after from
+          set to [ expr $from + 3600 * [ lindex $command 3 ] ]
+
+        } else {
+
+          # exactly day of from-date
+          set to [ expr $from + 3600 ]
+
+        }
+
+      }
+
+      # check period
+      if { $to - $now > 0 } {
+
+        puts stderr "End of period must be one minute before now."
+        exit 1
+
+      } elseif { $now - $from > 172800 } {
+
+        puts stderr "Begin is out of range of 48 hours."
+        exit 1
+
+      }
+
+      # let's go
+      init $INIT(subscribe_cmd)
+
+      set chunks  [ expr ( $to - $from ) / 60 / 8 ]
+      set remains [ expr ( $to - $from ) / 60 % 8 ]
+      set shift   [ expr ( $now - $to ) / 60 ]
+
+      for { set i 0 } { $i <= $chunks } { incr i } {
+
+        set current_size [ array size data_per_minute ]
+
+        req_data 2 [ expr $i * 8 + $shift ] [ expr $i == $chunks ? $remains : 8 ]
+
+        if { [ array size data_per_minute ] == $current_size } {
+
+          break
+
+        }
+
+      }
+
+    }
+    ^header\ data$ {
+
+      set sem(header_data) "Timestamp\tWatt (Wh)\n"
+
+    }
+    ^reset$ {
+
+      init 0
+      reset_data
+
+    }
+    ^device$ {
+
+      init $INIT(device)
+
+    }
+    ^print$ {
+
+      print_sem
+
+    }
+    ^json$ {
+
+      json_sem
+
+    }
+    ^sleep.*$ {
+
+      check_command $command 1 "sleep" {^sleep [0-9]+$}
+      after [ expr [ lindex $command 1 ] * 1000 ]
+
+    }
+    ^verbose$ {
+
+      set verbose 1
+
+    }
+    ^debug$ {
+
+      log_user 1
+
+    }
+    ^help\ .+$ {
+
+      set h { "--help" }
+      lappend h [ lindex $command 1 ]
+      help $h
+
+    }
+    ^.*$ {
+
+      help ""
+
+    }
+  }
+}
+
+
+
+
+# logs output to stdout
+proc log { l } {
+
+  global verbose
+
+  if { $verbose != 0 } {
+
+    puts stderr $l
+
+  }
+
+}
+
+
+
+
+proc check_command {argv req command reg} {
+
+  global HELP
+
+  set check [ regexp $reg [ concat $argv ] ]
+
+  if { [ llength $argv ] <= $req || $check == 0 } {
+    puts stderr $HELP(usage)
+    puts stderr $HELP($command)
+    puts stderr ""
+    exit 1
+  }
+
+}
+
+
+
+
+######################### main #########################
+help $argv
+
+# 1. get mac
+set sem(mac) [ get_mac [ lindex $argv 0 ] ]
+if { $sem(mac) == "" } {
+  puts stderr "Smart-energy-meter \"[ lindex $argv 0 ]\" currently not known. Edit ~/.known_sems file before using aliases."
+  exit 1
+}
+set argv [ lrange $argv 1 end ]
+
+# 2. calculate secret key
+set sem(secret) [ get_secret $sem(mac) ]
+
+# 3. Open interactive gatttool session
+spawn -noecho /usr/bin/gatttool -I
+
+## 4. collect commands
+set command {}
+while { 1 } {
+
+  set param [ lindex $argv 0 ]
+  set argv [ lrange $argv 1 end ]
+
+  if { [string range $param 0 1 ] == "--" } {
+    set param [string range $param 2 end ]
+    if { [ llength $command ] > 0 } {
+      do_command $command
+      set command {}
+    }
+    if { [ llength $argv ] == 0 } {
+      do_command $param
+      break
+    }
+  }
+
+  lappend command $param
+
+  if { [ llength $argv ] == 0 } {
+    if { [ llength $command ] > 0 } {
+      do_command $command
+    }
+    break
+  }
+}
+
+# 5. close gatttool session
+gatt_disconnect
+close -i $spawn_id
